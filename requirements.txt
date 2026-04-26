@@ -1,5 +1,5 @@
 # === CORE RAG & LLM ===
-llama-cpp-python>=0.3.0
+# llama-cpp-python>=0.3.0 — устанавливается ВРУЧНУЮ (см. README)
 sentence-transformers>=3.0.0
 chromadb>=0.5.0
 pydantic>=2.0.0
@@ -25,3 +25,5 @@ tqdm>=4.66.0
 huggingface_hub>=0.20.0
 requests>=2.31.0
 ddgs>=3.0.0
+
+scikit-learn>=1.3.0

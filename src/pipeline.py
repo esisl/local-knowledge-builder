@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 from src.search import search_queries, generate_search_queries, SearchResult
 from src.crawler import crawl_batch, CrawledPage
 
+from src.cleaner import filter_by_relevance, load_markdown_file
+from src.chunker import process_directory, CleanedChunk
+
 # === КОНФИГ-МОДЕЛИ (валидация через pydantic) ===
 class LLMConfig(BaseModel):
     name: str = Field(..., description="Имя файла .gguf")
@@ -133,6 +136,8 @@ def run_stage0(config: ProjectConfig):
   session save <path>  — сохранить историю сессии
   session load <path>  — загрузить историю сессии
   collect <тема>       — запустить сбор данных (Этап 1)
+  process <тема>       — дедупликация + чанкинг (Этап 2)
+  index <тема>         — векторизация + индексация (Этап 3, скоро)
   help                 — эта справка
             """)
             continue
@@ -160,6 +165,14 @@ def run_stage0(config: ProjectConfig):
                 print("Используйте: collect <тема>, например: collect Erlang concurrency")
                 continue
             run_stage1(config, topic)
+            continue
+
+        if user_input.startswith("process "):
+            topic = user_input[len("process "):].strip()
+            if not topic:
+                print("Используйте: process <тема>, например: process Erlang concurrency")
+                continue
+            run_stage2(config, topic)
             continue
         
         # === Обычный запрос к модели ===
@@ -220,6 +233,60 @@ def run_stage1(config: ProjectConfig, topic: str, max_urls: int = 20):
     
     if saved:
         print(f"\n💡 Следующий шаг: дедупликация и чанкинг (Этап 2)")
+
+def run_stage2(config: ProjectConfig, topic: Optional[str] = None):
+    """Этап 2: дедупликация + чанкинг."""
+    from pathlib import Path
+    
+    print(f"\n🔧 {config.project_name} — этап 2: очистка и чанкинг")
+    
+    raw_dir = Path(config.paths["data"]) / "raw"
+    chunks_dir = Path(config.paths["data"]) / "chunks"
+    
+    if not raw_dir.exists():
+        print(f"❌ Папка с сырыми данными не найдена: {raw_dir}")
+        print("💡 Сначала выполните: collect <тема>")
+        return
+    
+    # Параметры из конфига или дефолты
+    max_tokens = getattr(config, 'chunk_max_tokens', 700)
+    overlap = getattr(config, 'chunk_overlap', 100)
+    dedup_threshold = getattr(config, 'dedup_threshold', 0.85)
+    
+    # Запускаем пайплайн
+    stats = process_directory(
+        raw_dir=raw_dir,
+        output_dir=chunks_dir,
+        max_tokens=max_tokens,
+        overlap=overlap,
+        dedup_threshold=dedup_threshold
+    )
+    
+    # Опциональная фильтрация по релевантности
+    if topic:
+        print(f"\n🎯 Фильтрация по теме: '{topic}'")
+        chunks_file = chunks_dir / "chunks.jsonl"
+        if chunks_file.exists():
+            # Загружаем чанки
+            chunks = []
+            with open(chunks_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    chunks.append(json.loads(line))
+            
+            # Фильтруем
+            from src.cleaner import filter_by_relevance
+            filtered = filter_by_relevance(chunks, topic, min_score=0.6)
+            
+            # Перезаписываем
+            with open(chunks_file, 'w', encoding='utf-8') as f:
+                for c in filtered:
+                    f.write(json.dumps(c, ensure_ascii=False) + '\n')
+            
+            print(f"✅ После фильтрации: {len(filtered)} чанков")
+    
+    print(f"\n💡 Следующий шаг: векторизация и индексация (Этап 3)")
+    print(f"   Команда: python -m src.pipeline → index <тема>")
+
 
 def main():
     """Точка входа."""

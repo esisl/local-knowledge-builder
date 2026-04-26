@@ -1,5 +1,48 @@
 WIP: CLI для сбора локального RAG. Цель: рабочий прототип за 2 недели
 
+## 🔧 Установка
+
+### 1. Базовые зависимости
+```bash
+pip install -r requirements.txt
+
+llama-cpp-python (CUDA для NVIDIA)
+Этот пакет требует ручной установки из-за специфики CUDA-сборки на Windows.
+Для NVIDIA RTX 3060 (CUDA 12.x):
+pip install llama-cpp-python --upgrade --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+
+Проверка установки:
+python -c "import llama_cpp; print('OK')"
+
+Проверка окружения:
+python scripts/validate_env.py
+
+### 🚀 4. Проверка после исправлений
+
+```bash
+# 1. Убедитесь, что требования установлены (без llama-cpp)
+pip install -r requirements.txt --upgrade
+
+# 2. Запустите пайплайн
+cd d:\user\local-knowledge-builder
+python -m src.pipeline
+
+# 3. В меню введите:
+👤 Вы: process Erlang concurrency
+
+Ожидаемый вывод (если datasketch установлен):
+🔧 local-knowledge-builder — этап 2: очистка и чанкинг
+🗑️  Дедупликация: 13 → 10 уникальных файлов
+📦 Создано 47 чанков из 10 файлов
+💾 Сохранено в: data\chunks\chunks.jsonl
+
+Если datasketch не установлен:
+⚠️  datasketch не установлен — пропуск дедупликации
+📦 Создано 62 чанков из 13 файлов  # больше, потому что дубли не удалены
+
+В этом случае доустановите:
+pip install datasketch
+
 Поэтапный план работ (проверяемые промежуточные результаты)
 Каждый этап завершается командой/скриптом, который выдаёт конкретный артефакт. Не переходите к следующему, пока текущий не проходит проверку.
 
