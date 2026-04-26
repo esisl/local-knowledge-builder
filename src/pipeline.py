@@ -11,6 +11,9 @@ from typing import Optional, List, Dict, Any
 import yaml
 from pydantic import BaseModel, Field
 
+from src.search import search_queries, generate_search_queries, SearchResult
+from src.crawler import crawl_batch, CrawledPage
+
 # === КОНФИГ-МОДЕЛИ (валидация через pydantic) ===
 class LLMConfig(BaseModel):
     name: str = Field(..., description="Имя файла .gguf")
@@ -99,13 +102,11 @@ def load_config(config_path: Path) -> ProjectConfig:
         raw = yaml.safe_load(f)
     return ProjectConfig(**raw)
 
-
 def run_stage0(config: ProjectConfig):
-    """Этап 0: интерактивный инференс без RAG."""
-    print(f"\n🚀 {config.project_name} — этап 0: базовый инференс")
+    """Этап 0: интерактивный инференс + доступ к другим этапам."""
+    print(f"\n🚀 {config.project_name} — консоль управления")
     print(f"Модель: {config.llm.name}")
-    print(f"Контекст: {config.llm.n_ctx} токенов, GPU-слои: {config.llm.n_gpu_layers}")
-    print("Введите 'exit' для выхода, 'session save/load <path>' для управления сессией.\n")
+    print("Команды: 'exit', 'session save/load <path>', 'collect <topic>', 'help'\n")
     
     llm = SimpleLLM(config.llm, config.llm_path)
     system_prompt = "Ты — полезный ассистент. Отвечай кратко и по делу."
@@ -120,7 +121,22 @@ def run_stage0(config: ProjectConfig):
         if not user_input:
             continue
         
-        # Команды сессии
+        # === Команды управления ===
+        if user_input.lower() in ("exit", "quit", "выход"):
+            print("👋 Завершение работы.")
+            break
+        
+        if user_input.lower() == "help":
+            print("""
+📋 Доступные команды:
+  exit / quit          — выход
+  session save <path>  — сохранить историю сессии
+  session load <path>  — загрузить историю сессии
+  collect <тема>       — запустить сбор данных (Этап 1)
+  help                 — эта справка
+            """)
+            continue
+        
         if user_input.startswith("session "):
             parts = user_input.split(maxsplit=2)
             if len(parts) < 2:
@@ -138,19 +154,72 @@ def run_stage0(config: ProjectConfig):
                 print("Неизвестная команда сессии. Используйте save/load.")
             continue
         
-        if user_input.lower() in ("exit", "quit", "выход"):
-            print("👋 Завершение работы.")
-            break
+        if user_input.startswith("collect "):
+            topic = user_input[len("collect "):].strip()
+            if not topic:
+                print("Используйте: collect <тема>, например: collect Erlang concurrency")
+                continue
+            run_stage1(config, topic)
+            continue
         
-        # Запрос к модели
+        # === Обычный запрос к модели ===
         print("🤖 Модель: ", end="", flush=True)
         try:
             answer = llm.ask(user_input, system_prompt)
             print(answer)
         except Exception as e:
             print(f"\n❌ Ошибка: {e}")
-            print("Попробуйте уменьшить n_ctx или n_gpu_layers в config.yaml")
 
+def run_stage1(config: ProjectConfig, topic: str, max_urls: int = 20):
+    """Этап 1: сбор данных по теме с подробным логированием."""
+    from pathlib import Path
+    
+    print(f"\n🔍 {config.project_name} — этап 1: сбор данных")
+    print(f"Тема: {topic}")
+    
+    queries = generate_search_queries(topic)
+    print(f"📋 Поисковые запросы ({len(queries)}):")
+    for i, q in enumerate(queries, 1):
+        print(f"   {i}. {q}")
+    
+    print(f"\n🔎 Поиск URL...")
+    try:
+        search_results = search_queries(queries, max_results_per_query=5)
+        print(f"✅ Найдено {len(search_results)} уникальных URL:")
+        for i, r in enumerate(search_results, 1):
+            print(f"   {i}. {r.url}")
+    except Exception as e:
+        print(f"❌ Ошибка поиска: {e}")
+        print("💡 Убедитесь, что установлен пакет: pip install ddgs")
+        return
+    
+    if not search_results:
+        print("⚠️  Поисковая выдача пуста. Попробуйте другую тему.")
+        return
+
+    raw_dir = Path(config.paths["data"]) / "raw"
+    print(f"\n🕷️  Парсинг страниц (сохранение в {raw_dir})...")
+    
+    urls_to_crawl = [r.url for r in search_results[:max_urls]]
+    crawl_results = crawl_batch(urls_to_crawl, raw_dir, skip_existing=True)
+    
+    # Подробный отчёт
+    saved = [r for r in crawl_results if r["status"] == "saved"]
+    skipped = [r for r in crawl_results if r["status"] == "skipped"]
+    errors = [r for r in crawl_results if r["status"] == "error"]
+    
+    print(f"\n📊 Итог:")
+    print(f"   ✅ Сохранено: {len(saved)}")
+    for r in saved: print(f"      📄 {r['file']}")
+    
+    print(f"   ⏭️  Пропущено: {len(skipped)}")
+    for r in skipped: print(f"      ⏩ {r['url']}")
+    
+    print(f"   ❌ Ошибки: {len(errors)}")
+    for r in errors: print(f"      🚫 {r['url']}\n         → {r['error']}")
+    
+    if saved:
+        print(f"\n💡 Следующий шаг: дедупликация и чанкинг (Этап 2)")
 
 def main():
     """Точка входа."""
