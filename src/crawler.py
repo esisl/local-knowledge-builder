@@ -62,12 +62,10 @@ class CrawledPage:
         
         return filepath
 
-
 def crawl_url(url: str, timeout_sec: int = 30) -> CrawledPage:
     """
     Загружает и парсит одну страницу.
-    
-    Возвращает CrawledPage с error=None при успехе, или с описанием ошибки.
+    requests + trafilatura (без fetch_url, только extract).
     """
     if not HAS_TRAFILATURA:
         return CrawledPage(
@@ -77,46 +75,76 @@ def crawl_url(url: str, timeout_sec: int = 30) -> CrawledPage:
         )
     
     try:
-        # Настраиваем trafilatura на агрессивную очистку
-        config = use_config()
-        config.set("DEFAULT", "extensive_cleanup", "true")
-        config.set("DEFAULT", "favor_precision", "true")
+        import requests
+        import re
         
-        # Загружаем страницу
-        downloaded = trafilatura.fetch_url(url, timeout=timeout_sec)
-        if not downloaded:
+        # 1. Загрузка через requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        response = requests.get(url, headers=headers, timeout=timeout_sec)
+        response.raise_for_status()
+        
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' not in content_type and 'application/xhtml' not in content_type:
             return CrawledPage(
                 url=url, title="", content="", word_count=0,
                 fetched_at=datetime.now().isoformat(),
-                error="Failed to fetch URL"
+                error=f"Unexpected content-type: {content_type}"
             )
         
-        # Парсим контент
+        downloaded = response.text
+        
+        # 2. Извлечение контента через trafilatura
         content = trafilatura.extract(
             downloaded,
-            config=config,
-            output_format="markdown",  # или "txt" для чистого текста
+            output_format="markdown",
             include_comments=False,
             include_tables=True,
             include_formatting=True,
+            # config больше не передаётся здесь
         )
         
+        # Фолбэк на txt, если markdown пустой
         if not content or len(content.strip()) < 50:
-            return CrawledPage(
-                url=url, title="", content="", word_count=0,
-                fetched_at=datetime.now().isoformat(),
-                error="No meaningful content extracted"
+            content = trafilatura.extract(
+                downloaded,
+                output_format="txt",
+                include_comments=False,
+                include_tables=False,
             )
         
-        # Извлекаем метаданные
-        metadata = trafilatura.extract_metadata(downloaded, config=config)
-        meta_dict = {
-            k: str(v)[:200] for k, v in metadata.__dict__.items() 
-            if v and isinstance(v, (str, int))
-        } if metadata else {}
+        if not content or len(content.strip()) < 50:
+            # Последний фолбэк: берём <body> как есть, очищая скрипты/стили
+            clean_text = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', downloaded, flags=re.DOTALL | re.I)
+            clean_text = re.sub(r'<[^>]+>', '', clean_text)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            if len(clean_text) < 50:
+                return CrawledPage(
+                    url=url, title="", content="", word_count=0,
+                    fetched_at=datetime.now().isoformat(),
+                    error="No meaningful content extracted"
+                )
+            content = clean_text
         
-        # Чистим заголовок
-        title = metadata.title if metadata and metadata.title else "Untitled"
+        # 3. Метаданные (без config, с try/except)
+        meta_dict = {}
+        try:
+            metadata = trafilatura.extract_metadata(downloaded)
+            if metadata:
+                for k, v in metadata.__dict__.items():
+                    if v and isinstance(v, (str, int)):
+                        meta_dict[k] = str(v)[:200]
+        except Exception:
+            pass  # Игнорируем ошибки метаданных, не критично
+        
+        # 4. Заголовок
+        title = getattr(metadata, 'title', None) if 'metadata' in locals() else None
+        if not title:
+            title_match = re.search(r'<title>([^<]+)</title>', downloaded, re.I)
+            title = title_match.group(1).strip() if title_match else "Untitled"
         title = re.sub(r'\s+', ' ', title.strip())[:200]
         
         return CrawledPage(
@@ -128,13 +156,18 @@ def crawl_url(url: str, timeout_sec: int = 30) -> CrawledPage:
             metadata=meta_dict
         )
         
+    except requests.exceptions.Timeout:
+        return CrawledPage(url=url, title="", content="", word_count=0,
+                          fetched_at=datetime.now().isoformat(), error=f"Timeout after {timeout_sec}s")
+    except requests.exceptions.ConnectionError:
+        return CrawledPage(url=url, title="", content="", word_count=0,
+                          fetched_at=datetime.now().isoformat(), error="Connection error")
+    except requests.exceptions.HTTPError as e:
+        return CrawledPage(url=url, title="", content="", word_count=0,
+                          fetched_at=datetime.now().isoformat(), error=f"HTTP {e.response.status_code}")
     except Exception as e:
-        return CrawledPage(
-            url=url, title="", content="", word_count=0,
-            fetched_at=datetime.now().isoformat(),
-            error=f"{type(e).__name__}: {str(e)[:100]}"
-        )
-
+        return CrawledPage(url=url, title="", content="", word_count=0,
+                          fetched_at=datetime.now().isoformat(), error=f"{type(e).__name__}: {str(e)[:100]}")
 
 def crawl_batch(urls: list[str], output_dir: Path, skip_existing: bool = True) -> list[dict]:
     """
