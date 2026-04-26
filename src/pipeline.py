@@ -17,6 +17,11 @@ from src.crawler import crawl_batch, CrawledPage
 from src.cleaner import filter_by_relevance, load_markdown_file
 from src.chunker import process_directory, CleanedChunk
 
+from src.embedder import embed_chunks_jsonl
+from src.indexer import save_to_chromadb, export_db
+
+from src.rag_engine import RAGEngine, RAGResult
+
 # === КОНФИГ-МОДЕЛИ (валидация через pydantic) ===
 class LLMConfig(BaseModel):
     name: str = Field(..., description="Имя файла .gguf")
@@ -137,7 +142,8 @@ def run_stage0(config: ProjectConfig):
   session load <path>  — загрузить историю сессии
   collect <тема>       — запустить сбор данных (Этап 1)
   process <тема>       — дедупликация + чанкинг (Этап 2)
-  index <тема>         — векторизация + индексация (Этап 3, скоро)
+  index <тема>         — векторизация + индексация + экспорт (Этап 3)
+  query <вопрос>       — выполнить RAG-запрос по последней проиндексированной теме             
   help                 — эта справка
             """)
             continue
@@ -173,6 +179,33 @@ def run_stage0(config: ProjectConfig):
                 print("Используйте: process <тема>, например: process Erlang concurrency")
                 continue
             run_stage2(config, topic)
+            continue
+
+        if user_input.startswith("index "):
+            topic = user_input[len("index "):].strip()
+            if not topic:
+                print("Используйте: index <тема>")
+                continue
+            run_stage3(config, topic)
+            continue
+
+        if user_input.startswith("query "):
+            # Для простоты: тема берётся из последнего успешного index/collect
+            # В продакшене — хранить текущую тему в состоянии
+            topic = "Erlang concurrency"  # Заглушка, потом вынесем в config
+            question = user_input[len("query "):].strip()
+            if not question:
+                print("Используйте: query <вопрос>")
+                continue
+            run_stage4(config, topic, question)
+            continue
+
+        if user_input.startswith("build "):
+            topic = user_input[len("build "):].strip()
+            if not topic:
+                print("Используйте: build <тема>")
+                continue
+            run_build(config, topic)
             continue
         
         # === Обычный запрос к модели ===
@@ -287,6 +320,91 @@ def run_stage2(config: ProjectConfig, topic: Optional[str] = None):
     print(f"\n💡 Следующий шаг: векторизация и индексация (Этап 3)")
     print(f"   Команда: python -m src.pipeline → index <тема>")
 
+def run_stage3(config: ProjectConfig, topic: str):
+    """Этап 3: векторизация + индексация + экспорт."""
+    from pathlib import Path
+
+    print(f"\n🔮 {config.project_name} — этап 3: векторизация и индексация")
+
+    chunks_file = Path(config.paths["data"]) / "chunks" / "chunks.jsonl"
+    if not chunks_file.exists():
+        print(f"❌ Файл чанков не найден: {chunks_file}")
+        print("💡 Сначала выполните: process <тема>")
+        return
+
+    # 1. Векторизация
+    try:
+        chunks_with_emb = embed_chunks_jsonl(chunks_file, batch_size=32)
+    except ImportError as e:
+        print(f"❌ {e}")
+        return
+
+    if not chunks_with_emb:
+        print("⚠️  Нечего индексировать.")
+        return
+
+    # 2. Индексация
+    safe_topic = topic.replace(" ", "_").lower()
+    db_dir = Path(config.paths["data"]) / "vectors" / f"{safe_topic}_db"
+    save_to_chromadb(chunks_with_emb, db_dir, collection_name=safe_topic)
+
+    # 3. Экспорт
+    export_dir = Path(config.paths["data"]) / "exports"
+    archive, sha = export_db(db_dir, export_dir, collection_name=safe_topic)
+    print(f"💾 Архив готов для переноса на изолированную машину: {archive}")
+    print(f"🔒 Контрольная сумма: {sha}")
+
+    print("\n🎉 RAG-база готова! Следующий шаг: тестирование запросов (Этап 4)")
+
+def run_stage4(config: ProjectConfig, topic: str, query: str):
+    """Этап 4: выполнение RAG-запроса."""
+    from pathlib import Path
+    
+    print(f"\n🔍 {config.project_name} — RAG-запрос")
+    
+    # Пути к базе и модели
+    safe_topic = topic.replace(" ", "_").lower()
+    db_path = Path(config.paths["data"]) / "vectors" / f"{safe_topic}_db"
+    llm_path = Path(config.paths["models"]) / "llm" / config.llm.name
+    
+    if not db_path.exists():
+        print(f"❌ База не найдена: {db_path}")
+        print("💡 Сначала выполните: index <тема>")
+        return
+    
+    if not llm_path.exists():
+        print(f"❌ Модель не найдена: {llm_path}")
+        print("💡 Запустите: python scripts/download_models.py")
+        return
+    
+    # Инициализация движка
+    rag_config = {
+        "collection_name": safe_topic,
+        "n_ctx": config.llm.n_ctx,
+        "n_gpu_layers": config.llm.n_gpu_layers,
+        "top_k": config.rag.get("top_k", 4),
+        "min_score": config.rag.get("min_score", 0.65),
+        "fallback_message": config.rag.get("fallback_message", "В базе нет релевантных данных.")
+    }
+    
+    print(f"🧠 Загрузка RAG-движка...")
+    engine = RAGEngine(db_path, llm_path, rag_config)
+    
+    # Выполнение запроса
+    print(f"❓ Вопрос: {query}")
+    result = engine.ask(query)
+    
+    # Вывод ответа
+    print(f"\n🤖 Ответ:\n{result.answer}")
+    
+    # Источники
+    if result.sources:
+        print(f"\n📚 Использовано источников: {result.context_used}")
+        for i, src in enumerate(result.sources, 1):
+            print(f"   [{i}] {src['title'][:60]}...")
+            print(f"       📁 {src['source']} | 🎯 {src['score']:.2f}")
+    else:
+        print(f"\n⚠️  Источники не найдены (порог релевантности: {rag_config['min_score']})")
 
 def main():
     """Точка входа."""
@@ -307,6 +425,22 @@ def main():
         if "CUDA" in str(e) or "memory" in str(e).lower():
             print("💡 Совет: уменьшите n_gpu_layers в config.yaml до 20 или n_ctx до 4096")
         return 1
+    
+def run_build(config: ProjectConfig, topic: str):
+    """Полный пайплайн: collect → process → index."""
+    print(f"\n🏗️  {config.project_name} — полная сборка базы: '{topic}'")
+    
+    # Этап 1
+    run_stage1(config, topic, max_urls=20)
+    
+    # Этап 2
+    run_stage2(config, topic)
+    
+    # Этап 3
+    run_stage3(config, topic)
+    
+    print(f"\n✅ Сборка завершена! База готова для запросов.")
+    print(f"💡 Используйте: query <ваш вопрос>")
 
 
 if __name__ == "__main__":
