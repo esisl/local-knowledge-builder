@@ -29,7 +29,7 @@ class SearchResult:
 
 
 def search_queries(queries: List[str], max_results_per_query: int = 10, 
-                   delay_sec: float = 1.0) -> List[SearchResult]:
+                   delay_sec: float = 2.0) -> List[SearchResult]:
     """
     Ищет по списку запросов, объединяет результаты, удаляет дубли по URL.
     

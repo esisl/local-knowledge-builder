@@ -29,10 +29,17 @@ class LLMConfig(BaseModel):
     n_gpu_layers: int = Field(25, ge=0, le=100, description="Слои на GPU")
     cache_prompt: bool = Field(True, description="Кэшировать промпт для сессии")
 
+# === НОВОЕ: конфигурация RAG ===
+class RAGConfig(BaseModel):
+    top_k: int = Field(4, ge=1, le=20, description="Количество чанков для ретривала")
+    min_score: float = Field(0.65, ge=0.0, le=1.0, description="Порог релевантности")
+    fallback_message: str = Field("В базе нет релевантных данных. Уточните запрос.", description="Ответ при пустом ретривале")
+
 class ProjectConfig(BaseModel):
     project_name: str
     paths: Dict[str, str]
     llm: LLMConfig
+    rag: RAGConfig = Field(default_factory=RAGConfig)  # <-- ДОБАВЛЕНО
     
     @property
     def models_dir(self) -> Path:
@@ -382,9 +389,10 @@ def run_stage4(config: ProjectConfig, topic: str, query: str):
         "collection_name": safe_topic,
         "n_ctx": config.llm.n_ctx,
         "n_gpu_layers": config.llm.n_gpu_layers,
-        "top_k": config.rag.get("top_k", 4),
-        "min_score": config.rag.get("min_score", 0.65),
-        "fallback_message": config.rag.get("fallback_message", "В базе нет релевантных данных.")
+        # ✅ Прямой доступ к полям Pydantic-модели
+        "top_k": config.rag.top_k,
+        "min_score": config.rag.min_score,
+        "fallback_message": config.rag.fallback_message
     }
     
     print(f"🧠 Загрузка RAG-движка...")
@@ -431,7 +439,7 @@ def run_build(config: ProjectConfig, topic: str):
     print(f"\n🏗️  {config.project_name} — полная сборка базы: '{topic}'")
     
     # Этап 1
-    run_stage1(config, topic, max_urls=20)
+    run_stage1(config, topic, max_urls=50)
     
     # Этап 2
     run_stage2(config, topic)

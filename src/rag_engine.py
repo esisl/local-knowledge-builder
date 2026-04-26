@@ -25,19 +25,19 @@ class RAGResult:
 class RAGEngine:
     """Основной класс RAG-движка."""
     
-    def __init__(self, db_path: Path, llm_path: Path, 
-                 config: Dict):
+    def __init__(self, db_path: Path, llm_path: Path, config: Dict):
         """
         Args:
             db_path: путь к папке ChromaDB
             llm_path: путь к .gguf модели
-            config: словарь с параметрами (n_ctx, n_gpu_layers, top_k, min_score)
+            config: словарь с параметрами
         """
-        # Загрузка векторной БД
+        # 1. Инициализация ChromaDB
         self.client = chromadb.PersistentClient(path=str(db_path))
-        self.collection = self.client.get_collection(name=config.get("collection_name", "rag_db"))
+        collection_name = config.get("collection_name", "rag_db")
+        self.collection = self.client.get_collection(name=collection_name)
         
-        # Загрузка LLM
+        # 2. Инициализация LLM
         self.llm = Llama(
             model_path=str(llm_path),
             n_ctx=config.get("n_ctx", 8192),
@@ -46,45 +46,49 @@ class RAGEngine:
             offload_kqv=True,
         )
         
+        # 3. Эмбеддер (ОБЯЗАТЕЛЬНО тот же, что использовался при индексации)
+        from sentence_transformers import SentenceTransformer
+        self.embedder = SentenceTransformer("BAAI/bge-small-en-v1.5", device="cpu")
+        
+        # 4. Параметры RAG
         self.top_k = config.get("top_k", 4)
         self.min_score = config.get("min_score", 0.65)
         self.fallback_message = config.get("fallback_message", "В базе нет релевантных данных.")
-    
+
     def retrieve(self, query: str) -> List[Tuple[Dict, float]]:
-        """Семантический поиск с возвратом чанков и скоринга."""
-        # ChromaDB сам векторизует запрос, если в коллекции есть функция эмбеддинга
-        # Но мы передаём заранее вычисленные эмбеддинги, поэтому используем query с include
+        # 1. Векторизуем запрос ТОЙ ЖЕ моделью
+        query_embedding = self.embedder.encode([query], normalize_embeddings=True)[0].tolist()
+        
+        # 2. Ищем по векторам, а не по тексту
         results = self.collection.query(
-            query_texts=[query],  # ChromaDB использует дефолтный эмбеддер коллекции
-            n_results=self.top_k * 2,  # Берём с запасом для фильтрации по score
+            query_embeddings=[query_embedding],  # <-- Исправлено
+            n_results=self.top_k * 2,
             include=["documents", "metadatas", "distances"]
         )
         
         if not results['documents'] or not results['documents'][0]:
             return []
         
-        # Парсим результаты
         chunks = []
-        for i, (doc, meta, dist) in enumerate(zip(
+        for doc, meta, dist in zip(
             results['documents'][0],
             results['metadatas'][0],
             results['distances'][0]
-        )):
-            # ChromaDB возвращает расстояние, конвертируем в сходство (простая эвристика)
-            # Для косинусного расстояния: similarity = 1 - distance
-            score = 1.0 - dist if dist is not None else 0.0
+        ):
+            # ChromaDB по умолчанию использует L2-дистанцию для кастомных эмбеддингов.
+            # Для нормализованных векторов: cosine_sim = 1 - (l2_dist / 2)
+            score = 1.0 - (dist / 2.0) if dist is not None else 0.0
             
             if score >= self.min_score:
                 chunks.append({
                     'text': doc,
                     'metadata': meta or {},
                     'score': round(score, 3)
-                },)
+                })
         
-        # Сортируем по убыванию релевантности
         chunks.sort(key=lambda x: x['score'], reverse=True)
         return [(c, c['score']) for c in chunks[:self.top_k]]
-    
+
     def build_prompt(self, query: str, retrieved: List[Tuple[Dict, float]]) -> str:
         """Формирует промпт в стиле Qwen Chat с контекстом."""
         # Формируем блок контекста
