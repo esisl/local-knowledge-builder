@@ -1,0 +1,24 @@
+# Модели и кэши
+*.gguf
+*.bin
+*.safetensors
+models/
+cache/
+
+# Векторные БД и промежуточные данные
+chroma_db/
+faiss_index/
+data/raw/
+data/chunks/
+data/vectors/
+
+# Окружение
+venv/
+.env
+__pycache__/
+*.pyc
+
+# ОС
+Thumbs.db
+.DS_Store
+desktop.ini

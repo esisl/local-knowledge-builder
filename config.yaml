@@ -1,0 +1,14 @@
+project_name: local-knowledge-builder
+paths:
+  data: ./data
+  models: ./models
+  logs: ./logs
+llm:
+  name: Qwen2.5-7B-Instruct-Q4_K_M.gguf
+  n_ctx: 16384
+  n_gpu_layers: 25
+  cache_prompt: true
+rag:
+  top_k: 4
+  min_score: 0.65
+  fallback_message: "В базе нет релевантных данных. Уточните запрос."
